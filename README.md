@@ -77,7 +77,7 @@ OUT_DIR=pdfs
 
 AUTO_START_CHROME=true
 CHROME_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe
-CHROME_USER_DATA_DIR=C:\Users\cherjr\monoprix-automation-chrome
+CHROME_USER_DATA_DIR=.chrome-profile
 CHROME_START_TIMEOUT_SECONDS=20
 
 SCROLL_STABLE_ROUNDS=5
@@ -100,7 +100,7 @@ When enabled, the Python script starts Chrome automatically using the configured
 #### `CHROME_USER_DATA_DIR`
 
 ```dotenv
-CHROME_USER_DATA_DIR=C:\Users\cherjr\monoprix-automation-chrome
+CHROME_USER_DATA_DIR=.chrome-profile
 ```
 
 This is a separate Chrome profile just for automation. It keeps your normal Chrome profiles untouched.
