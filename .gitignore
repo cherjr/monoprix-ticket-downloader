@@ -1,0 +1,18 @@
+# Secrets / local settings
+.env
+
+# Downloaded PDFs
+pdfs/
+*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
