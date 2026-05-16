@@ -1,6 +1,9 @@
 import asyncio
 import os
 import re
+import subprocess
+import time
+import urllib.request
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -10,14 +13,39 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 
 load_dotenv()
 
-URL = os.getenv("MONOPRIX_URL", "https://client.monoprix.fr/monoprix-shopping/tickets")
-CDP_URL = os.getenv("CDP_URL", "http://localhost:9222")
+MONOPRIX_URL = os.getenv(
+    "MONOPRIX_URL",
+    "https://client.monoprix.fr/monoprix-shopping/tickets",
+)
+
+CDP_HOST = os.getenv("CDP_HOST", "localhost")
+CDP_PORT = int(os.getenv("CDP_PORT", "9222"))
+CDP_URL = os.getenv("CDP_URL", f"http://{CDP_HOST}:{CDP_PORT}")
+
 OUT_DIR = Path(os.getenv("OUT_DIR", "pdfs"))
+
+AUTO_START_CHROME = os.getenv("AUTO_START_CHROME", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+CHROME_PATH = os.getenv(
+    "CHROME_PATH",
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+)
+
+CHROME_USER_DATA_DIR = os.getenv(
+    "CHROME_USER_DATA_DIR",
+    str(Path.home() / "monoprix-automation-chrome"),
+)
 
 SCROLL_STABLE_ROUNDS = int(os.getenv("SCROLL_STABLE_ROUNDS", "5"))
 SCROLL_WAIT_MS = int(os.getenv("SCROLL_WAIT_MS", "1800"))
 CLICK_TIMEOUT_MS = int(os.getenv("CLICK_TIMEOUT_MS", "7000"))
 PAGE_TIMEOUT_MS = int(os.getenv("PAGE_TIMEOUT_MS", "90000"))
+CHROME_START_TIMEOUT_SECONDS = int(os.getenv("CHROME_START_TIMEOUT_SECONDS", "20"))
 
 
 FRENCH_MONTHS = {
@@ -37,6 +65,64 @@ FRENCH_MONTHS = {
     "décembre": "12",
     "decembre": "12",
 }
+
+
+def is_cdp_available() -> bool:
+    try:
+        with urllib.request.urlopen(f"{CDP_URL}/json/version", timeout=2) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
+def start_chrome_if_needed() -> None:
+    if is_cdp_available():
+        print(f"Chrome DevTools already available at {CDP_URL}")
+        return
+
+    if not AUTO_START_CHROME:
+        raise RuntimeError(
+            f"Chrome DevTools is not available at {CDP_URL}. "
+            "Start Chrome manually or set AUTO_START_CHROME=true in .env."
+        )
+
+    chrome_exe = Path(CHROME_PATH)
+
+    if not chrome_exe.exists():
+        raise RuntimeError(
+            f"Chrome was not found at: {CHROME_PATH}\n"
+            "Edit CHROME_PATH in .env."
+        )
+
+    print("Starting automation Chrome...")
+    print(f"Chrome path: {CHROME_PATH}")
+    print(f"Chrome profile: {CHROME_USER_DATA_DIR}")
+    print(f"Debug port: {CDP_PORT}")
+
+    subprocess.Popen(
+        [
+            CHROME_PATH,
+            f"--remote-debugging-port={CDP_PORT}",
+            f"--user-data-dir={CHROME_USER_DATA_DIR}",
+            "--new-window",
+            MONOPRIX_URL,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    deadline = time.time() + CHROME_START_TIMEOUT_SECONDS
+
+    while time.time() < deadline:
+        if is_cdp_available():
+            print(f"Chrome DevTools is available at {CDP_URL}")
+            return
+
+        time.sleep(0.5)
+
+    raise RuntimeError(
+        f"Chrome started, but DevTools did not become available at {CDP_URL}."
+    )
 
 
 def safe_filename(name: str) -> str:
@@ -125,6 +211,16 @@ def final_pdf_filename(ticket_date_prefix: str, original_filename: str, index: i
     return safe_filename(f"{ticket_date_prefix}-item-{index + 1:03}-{stem}.pdf")
 
 
+def target_path_or_none(filename: str) -> Path | None:
+    path = OUT_DIR / filename
+
+    if path.exists():
+        print(f"Already exists, skipping: {path}")
+        return None
+
+    return path
+
+
 async def find_voir_buttons(page):
     locator = page.get_by_text("Voir", exact=True)
     count = await locator.count()
@@ -172,7 +268,7 @@ async def get_ticket_date_prefix(button, index: int) -> str:
                 const yDistance = Math.abs(centerY - btnCenterY);
                 const sameRow = yDistance < 80;
 
-                // In the Monoprix layout, the date is to the left of "Voir".
+                // In the Monoprix layout, the date is usually left of "Voir".
                 const isLeft = rect.right <= btnRect.left + 40;
                 const xDistance = isLeft
                     ? Math.abs(btnRect.left - rect.right)
@@ -196,6 +292,7 @@ async def get_ticket_date_prefix(button, index: int) -> str:
                 return candidates[0];
             }
 
+            // Fallback: search nearby ancestors but avoid huge containers.
             let node = btn;
             for (let depth = 0; depth < 8 && node; depth++) {
                 node = node.parentElement;
@@ -278,7 +375,10 @@ async def save_pdf_response(response, index: int, ticket_date_prefix: str) -> bo
     original_filename = filename_from_headers(headers, fallback)
     filename = final_pdf_filename(ticket_date_prefix, original_filename, index)
 
-    path = OUT_DIR / filename
+    path = target_path_or_none(filename)
+    if path is None:
+        return True
+
     body = await response.body()
     path.write_bytes(body)
 
@@ -292,6 +392,7 @@ async def click_and_capture_pdf(page, context, button, index: int) -> bool:
 
     ticket_date_prefix = await get_ticket_date_prefix(button, index)
 
+    # Case 1: normal browser download.
     try:
         async with page.expect_download(timeout=CLICK_TIMEOUT_MS) as download_info:
             await button.click()
@@ -300,7 +401,10 @@ async def click_and_capture_pdf(page, context, button, index: int) -> bool:
         original_filename = download.suggested_filename or f"monoprix-ticket-{index + 1:03}.pdf"
         filename = final_pdf_filename(ticket_date_prefix, original_filename, index)
 
-        path = OUT_DIR / filename
+        path = target_path_or_none(filename)
+        if path is None:
+            return True
+
         await download.save_as(path)
 
         print(f"Saved download: {path}")
@@ -309,6 +413,7 @@ async def click_and_capture_pdf(page, context, button, index: int) -> bool:
     except PlaywrightTimeoutError:
         pass
 
+    # Case 2: direct PDF network response.
     try:
         async with page.expect_response(
             lambda r: "pdf" in r.headers.get("content-type", "").lower(),
@@ -323,6 +428,7 @@ async def click_and_capture_pdf(page, context, button, index: int) -> bool:
     except PlaywrightTimeoutError:
         pass
 
+    # Case 3: PDF opens in popup/new tab.
     try:
         async with page.expect_popup(timeout=CLICK_TIMEOUT_MS) as popup_info:
             await button.click()
@@ -341,7 +447,11 @@ async def click_and_capture_pdf(page, context, button, index: int) -> bool:
                 original_filename = filename_from_headers(response.headers, fallback)
                 filename = final_pdf_filename(ticket_date_prefix, original_filename, index)
 
-                path = OUT_DIR / filename
+                path = target_path_or_none(filename)
+                if path is None:
+                    await popup.close()
+                    return True
+
                 path.write_bytes(await response.body())
 
                 print(f"Saved popup PDF: {path}")
@@ -361,6 +471,8 @@ async def click_and_capture_pdf(page, context, button, index: int) -> bool:
 async def main():
     OUT_DIR.mkdir(exist_ok=True)
 
+    start_chrome_if_needed()
+
     async with async_playwright() as p:
         print(f"Connecting to Chrome at {CDP_URL}...")
         browser = await p.chromium.connect_over_cdp(CDP_URL)
@@ -378,7 +490,7 @@ async def main():
 
         if page is None:
             page = context.pages[0] if context.pages else await context.new_page()
-            await page.goto(URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+            await page.goto(MONOPRIX_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
 
         print()
         print("Use the opened Chrome window to log in to Monoprix if needed.")
@@ -387,7 +499,7 @@ async def main():
 
         current_url = page.url
         if "monoprix.fr" not in current_url:
-            await page.goto(URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+            await page.goto(MONOPRIX_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
             await page.wait_for_timeout(5000)
         else:
             await page.wait_for_timeout(3000)
@@ -403,7 +515,7 @@ async def main():
             await browser.close()
             return
 
-        saved = 0
+        saved_or_skipped = 0
         failed = 0
 
         for i in range(count):
@@ -420,7 +532,7 @@ async def main():
             ok = await click_and_capture_pdf(page, context, button, i)
 
             if ok:
-                saved += 1
+                saved_or_skipped += 1
             else:
                 failed += 1
                 print(f"Could not capture PDF for item {i + 1}.")
@@ -429,7 +541,7 @@ async def main():
             await page.wait_for_timeout(1000)
 
         print()
-        print(f"Done. Saved: {saved}. Failed: {failed}.")
+        print(f"Done. Saved or skipped: {saved_or_skipped}. Failed: {failed}.")
         print(f"PDF folder: {OUT_DIR.resolve()}")
 
         await browser.close()

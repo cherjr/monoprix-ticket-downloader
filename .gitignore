@@ -1,7 +1,7 @@
-# Secrets / local settings
+# Local config
 .env
 
-# Downloaded PDFs
+# Downloaded files
 pdfs/
 *.pdf
 
@@ -10,6 +10,9 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+
+# Logs
+*.log
 
 # OS / editors
 .DS_Store
