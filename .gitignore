@@ -1,20 +1,11 @@
-# Local config
 .env
-
-# Downloaded files
 pdfs/
 *.pdf
+.chrome-profile/
 
-# Python
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
 
-# Logs
-*.log
-
-# OS / editors
 .DS_Store
 Thumbs.db
 .vscode/

@@ -13,6 +13,18 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 
 load_dotenv()
 
+BASE_DIR = Path(__file__).resolve().parent
+
+
+def resolve_local_path(value: str) -> str:
+    path = Path(value)
+
+    if path.is_absolute():
+        return str(path)
+
+    return str((BASE_DIR / path).resolve())
+
+
 MONOPRIX_URL = os.getenv(
     "MONOPRIX_URL",
     "https://client.monoprix.fr/monoprix-shopping/tickets",
@@ -22,7 +34,7 @@ CDP_HOST = os.getenv("CDP_HOST", "localhost")
 CDP_PORT = int(os.getenv("CDP_PORT", "9222"))
 CDP_URL = os.getenv("CDP_URL", f"http://{CDP_HOST}:{CDP_PORT}")
 
-OUT_DIR = Path(os.getenv("OUT_DIR", "pdfs"))
+OUT_DIR = Path(resolve_local_path(os.getenv("OUT_DIR", "pdfs")))
 
 AUTO_START_CHROME = os.getenv("AUTO_START_CHROME", "true").lower() in {
     "1",
@@ -36,16 +48,15 @@ CHROME_PATH = os.getenv(
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
 )
 
-CHROME_USER_DATA_DIR = os.getenv(
-    "CHROME_USER_DATA_DIR",
-    str(Path.home() / "monoprix-automation-chrome"),
+CHROME_USER_DATA_DIR = resolve_local_path(
+    os.getenv("CHROME_USER_DATA_DIR", ".chrome-profile")
 )
 
 SCROLL_STABLE_ROUNDS = int(os.getenv("SCROLL_STABLE_ROUNDS", "5"))
 SCROLL_WAIT_MS = int(os.getenv("SCROLL_WAIT_MS", "1800"))
 CLICK_TIMEOUT_MS = int(os.getenv("CLICK_TIMEOUT_MS", "7000"))
 PAGE_TIMEOUT_MS = int(os.getenv("PAGE_TIMEOUT_MS", "90000"))
-CHROME_START_TIMEOUT_SECONDS = int(os.getenv("CHROME_START_TIMEOUT_SECONDS", "20"))
+CHROME_START_TIMEOUT_SECONDS = int(os.getenv("CHROME_START_TIMEOUT_SECONDS", "30"))
 
 
 FRENCH_MONTHS = {
@@ -94,6 +105,8 @@ def start_chrome_if_needed() -> None:
             "Edit CHROME_PATH in .env."
         )
 
+    Path(CHROME_USER_DATA_DIR).mkdir(parents=True, exist_ok=True)
+
     print("Starting automation Chrome...")
     print(f"Chrome path: {CHROME_PATH}")
     print(f"Chrome profile: {CHROME_USER_DATA_DIR}")
@@ -103,7 +116,9 @@ def start_chrome_if_needed() -> None:
         [
             CHROME_PATH,
             f"--remote-debugging-port={CDP_PORT}",
+            "--remote-debugging-address=127.0.0.1",
             f"--user-data-dir={CHROME_USER_DATA_DIR}",
+            "--no-first-run",
             "--new-window",
             MONOPRIX_URL,
         ],
@@ -121,7 +136,9 @@ def start_chrome_if_needed() -> None:
         time.sleep(0.5)
 
     raise RuntimeError(
-        f"Chrome started, but DevTools did not become available at {CDP_URL}."
+        f"Chrome started, but DevTools did not become available at {CDP_URL}.\n"
+        f"Expected URL: {CDP_URL}/json/version\n"
+        f"Chrome profile used: {CHROME_USER_DATA_DIR}"
     )
 
 
@@ -132,93 +149,119 @@ def safe_filename(name: str) -> str:
     return name[:180] or "monoprix-ticket.pdf"
 
 
-def normalize_french_date_text(text: str, index: int) -> str:
-    text = " ".join((text or "").split()).lower()
+def normalize_store_name(store: str) -> str:
+    store = " ".join((store or "").split())
+    store = store or "Monoprix"
+    store = safe_filename(store)
+    store = store.replace(" ", "_")
+    return store or "Monoprix"
 
-    numeric = re.search(
+
+def normalize_amount_for_filename(amount: str) -> str:
+    amount = " ".join((amount or "").split())
+    amount = amount.replace("€", "")
+    amount = amount.replace("EUR", "")
+    amount = amount.replace("eur", "")
+    amount = amount.strip()
+    amount = amount.replace(",", "-")
+    amount = amount.replace(".", "-")
+    amount = re.sub(r"[^0-9\-]", "", amount)
+    return amount or "unknown-amount"
+
+
+def extract_ticket_data_from_text(row_text: str, index: int) -> dict:
+    """
+    Extracts:
+      - amount: 14,84€
+      - store: Monoprix
+      - timestamp: 15/05/2026 à 10h52
+
+    Returns filename like:
+      2026-05-15_10-52_Monoprix_14-84_EUR.pdf
+    """
+    text = " ".join((row_text or "").split())
+
+    amount_match = re.search(r"\b(\d+[,.]\d{2})\s*€", text)
+    amount_raw = amount_match.group(1) if amount_match else "unknown-amount"
+    amount_for_file = normalize_amount_for_filename(amount_raw)
+
+    numeric_datetime = re.search(
         r"\b([0-3]?\d)[/.\-]([01]?\d)[/.\-]((?:20)?\d{2})"
-        r"(?:\s+([0-2]?\d)[:hH]([0-5]\d))?",
-        text,
-    )
-
-    if numeric:
-        day = numeric.group(1).zfill(2)
-        month = numeric.group(2).zfill(2)
-        year = numeric.group(3)
-
-        if len(year) == 2:
-            year = "20" + year
-
-        hour = numeric.group(4)
-        minute = numeric.group(5)
-
-        if hour and minute:
-            return f"{year}-{month}-{day}_{hour.zfill(2)}-{minute.zfill(2)}"
-
-        return f"{year}-{month}-{day}"
-
-    written = re.search(
-        r"\b(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)?\s*"
-        r"([0-3]?\d)\s+"
-        r"(janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|septembre|octobre|novembre|décembre|decembre)"
-        r"\s+((?:20)?\d{2})"
-        r"(?:\s+([0-2]?\d)[:hH]([0-5]\d))?",
+        r"(?:\s*(?:à|a|@)?\s*([0-2]?\d)\s*[hH:]\s*([0-5]\d))?",
         text,
         re.I,
     )
 
-    if written:
-        day = written.group(1).zfill(2)
-        month = FRENCH_MONTHS[written.group(2).lower()]
-        year = written.group(3)
+    date_prefix = None
+
+    if numeric_datetime:
+        day = numeric_datetime.group(1).zfill(2)
+        month = numeric_datetime.group(2).zfill(2)
+        year = numeric_datetime.group(3)
 
         if len(year) == 2:
             year = "20" + year
 
-        hour = written.group(4)
-        minute = written.group(5)
+        hour = numeric_datetime.group(4)
+        minute = numeric_datetime.group(5)
 
         if hour and minute:
-            return f"{year}-{month}-{day}_{hour.zfill(2)}-{minute.zfill(2)}"
+            date_prefix = f"{year}-{month}-{day}_{hour.zfill(2)}-{minute.zfill(2)}"
+        else:
+            date_prefix = f"{year}-{month}-{day}"
 
-        return f"{year}-{month}-{day}"
+    if date_prefix is None:
+        written = re.search(
+            r"\b(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)?\s*"
+            r"([0-3]?\d)\s+"
+            r"(janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|septembre|octobre|novembre|décembre|decembre)"
+            r"\s+((?:20)?\d{2})"
+            r"(?:\s*(?:à|a|@)?\s*([0-2]?\d)\s*[hH:]\s*([0-5]\d))?",
+            text,
+            re.I,
+        )
 
-    return f"unknown-date-item-{index + 1:03}"
+        if written:
+            day = written.group(1).zfill(2)
+            month = FRENCH_MONTHS[written.group(2).lower()]
+            year = written.group(3)
 
+            if len(year) == 2:
+                year = "20" + year
 
-def filename_from_headers(headers: dict, fallback: str) -> str:
-    disposition = headers.get("content-disposition", "")
+            hour = written.group(4)
+            minute = written.group(5)
 
-    match = re.search(r"filename\*=UTF-8''([^;]+)", disposition, re.I)
-    if match:
-        return safe_filename(match.group(1))
+            if hour and minute:
+                date_prefix = f"{year}-{month}-{day}_{hour.zfill(2)}-{minute.zfill(2)}"
+            else:
+                date_prefix = f"{year}-{month}-{day}"
 
-    match = re.search(r'filename="?([^";]+)"?', disposition, re.I)
-    if match:
-        return safe_filename(match.group(1))
+    if date_prefix is None:
+        date_prefix = f"unknown-date-item-{index + 1:03}"
 
-    return safe_filename(fallback)
+    # Store extraction:
+    # Prefer a line containing Monoprix. If there are variants like "Monoprix Montparnasse",
+    # this keeps the visible store text.
+    lines = [line.strip() for line in (row_text or "").splitlines() if line.strip()]
+    store_raw = "Monoprix"
 
+    for line in lines:
+        if "monoprix" in line.lower():
+            store_raw = line
+            break
 
-def final_pdf_filename(ticket_date_prefix: str, original_filename: str, index: int) -> str:
-    original_filename = safe_filename(original_filename)
+    store_for_file = normalize_store_name(store_raw)
 
-    if original_filename.lower().endswith(".pdf"):
-        stem = original_filename[:-4]
-    else:
-        stem = original_filename
+    filename = safe_filename(f"{date_prefix}_{store_for_file}_{amount_for_file}_EUR.pdf")
 
-    return safe_filename(f"{ticket_date_prefix}-item-{index + 1:03}-{stem}.pdf")
-
-
-def target_path_or_none(filename: str) -> Path | None:
-    path = OUT_DIR / filename
-
-    if path.exists():
-        print(f"Already exists, skipping: {path}")
-        return None
-
-    return path
+    return {
+        "row_text": row_text,
+        "date_prefix": date_prefix,
+        "store": store_raw,
+        "amount": amount_raw,
+        "filename": filename,
+    }
 
 
 async def find_voir_buttons(page):
@@ -234,14 +277,77 @@ async def find_voir_buttons(page):
     return locator, count
 
 
-async def get_ticket_date_prefix(button, index: int) -> str:
+async def accept_cookies_if_present(page) -> None:
+    """
+    Best-effort cookie popup handling.
+    It tries common French/English accept button texts.
+    If nothing is present, it does nothing.
+    """
+    texts = [
+        "Tout accepter",
+        "Accepter tout",
+        "J'accepte",
+        "J’accepte",
+        "Accepter",
+        "OK",
+        "Accept all",
+        "Accept",
+    ]
+
+    for text in texts:
+        try:
+            locator = page.get_by_text(text, exact=True)
+            if await locator.count() > 0:
+                first = locator.first
+                if await first.is_visible(timeout=1000):
+                    print(f"Cookie popup: clicking '{text}'")
+                    await first.click(timeout=3000)
+                    await page.wait_for_timeout(1000)
+                    return
+        except Exception:
+            pass
+
+    # Fallback for common OneTrust-style buttons.
+    selectors = [
+        "#onetrust-accept-btn-handler",
+        "button[id*='accept']",
+        "button[class*='accept']",
+        "button:has-text('Tout accepter')",
+        "button:has-text('Accepter')",
+    ]
+
+    for selector in selectors:
+        try:
+            locator = page.locator(selector)
+            if await locator.count() > 0:
+                first = locator.first
+                if await first.is_visible(timeout=1000):
+                    print(f"Cookie popup: clicking selector {selector}")
+                    await first.click(timeout=3000)
+                    await page.wait_for_timeout(1000)
+                    return
+        except Exception:
+            pass
+
+
+async def get_ticket_row_text(button, index: int) -> str:
+    """
+    Finds text visually aligned with this specific Voir button.
+    The Monoprix row usually has:
+      amount
+      store
+      date/time
+      Voir
+    """
     result = await button.evaluate(
         """
         (btn) => {
             const btnRect = btn.getBoundingClientRect();
 
             const dateRegex =
-                /(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)?\\s*\\b\\d{1,2}\\s+(?:janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|septembre|octobre|novembre|décembre|decembre)\\s+20\\d{2}\\b|\\b\\d{1,2}[/.\\-]\\d{1,2}[/.\\-](?:20)?\\d{2}\\b/i;
+                /\\b\\d{1,2}[/.\\-]\\d{1,2}[/.\\-](?:20)?\\d{2}\\s*(?:à|a|@)?\\s*\\d{1,2}\\s*[hH:]\\s*\\d{2}\\b|(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)?\\s*\\b\\d{1,2}\\s+(?:janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|septembre|octobre|novembre|décembre|decembre)\\s+20\\d{2}\\b/i;
+
+            const amountRegex = /\\b\\d+[,.]\\d{2}\\s*€/;
 
             const elements = Array.from(document.querySelectorAll("body *"));
             const candidates = [];
@@ -254,10 +360,15 @@ async def get_ticket_date_prefix(button, index: int) -> str:
 
                 const text = (el.innerText || el.textContent || "").replace(/\\s+/g, " ").trim();
                 if (!text) continue;
-                if (!dateRegex.test(text)) continue;
+
+                const hasDate = dateRegex.test(text);
+                const hasAmount = amountRegex.test(text);
+                const hasStore = /monoprix/i.test(text);
+
+                if (!hasDate && !hasAmount && !hasStore) continue;
 
                 // Avoid giant containers containing the whole ticket list.
-                if (text.length > 220) continue;
+                if (text.length > 300) continue;
 
                 const rect = el.getBoundingClientRect();
                 if (rect.width <= 0 || rect.height <= 0) continue;
@@ -266,21 +377,28 @@ async def get_ticket_date_prefix(button, index: int) -> str:
                 const btnCenterY = btnRect.top + btnRect.height / 2;
 
                 const yDistance = Math.abs(centerY - btnCenterY);
-                const sameRow = yDistance < 80;
+                const sameRow = yDistance < 90;
 
-                // In the Monoprix layout, the date is usually left of "Voir".
-                const isLeft = rect.right <= btnRect.left + 40;
+                if (!sameRow) continue;
+
+                const isLeft = rect.right <= btnRect.left + 80;
                 const xDistance = isLeft
                     ? Math.abs(btnRect.left - rect.right)
                     : Math.abs(rect.left - btnRect.left) + 500;
 
-                if (!sameRow) continue;
+                let bonus = 0;
+                if (hasDate) bonus -= 1000;
+                if (hasAmount) bonus -= 300;
+                if (hasStore) bonus -= 300;
 
-                const score = yDistance * 10 + xDistance + text.length * 0.5;
+                const score = yDistance * 10 + xDistance + text.length * 0.2 + bonus;
 
                 candidates.push({
                     text,
                     score,
+                    hasDate,
+                    hasAmount,
+                    hasStore,
                     yDistance,
                     xDistance
                 });
@@ -288,20 +406,36 @@ async def get_ticket_date_prefix(button, index: int) -> str:
 
             candidates.sort((a, b) => a.score - b.score);
 
-            if (candidates.length > 0) {
-                return candidates[0];
+            // Try to find a compact container that has date + amount + Monoprix.
+            const full = candidates.find(c => c.hasDate && c.hasAmount && c.hasStore);
+            if (full) return full;
+
+            // Otherwise combine same-row candidates.
+            const sameRowTexts = candidates
+                .slice(0, 10)
+                .map(c => c.text)
+                .filter(Boolean);
+
+            if (sameRowTexts.length > 0) {
+                return {
+                    text: [...new Set(sameRowTexts)].join("\\n"),
+                    score: 99998,
+                    combined: true
+                };
             }
 
-            // Fallback: search nearby ancestors but avoid huge containers.
+            // Ancestor fallback.
             let node = btn;
             for (let depth = 0; depth < 8 && node; depth++) {
                 node = node.parentElement;
                 if (!node) break;
 
-                const text = (node.innerText || node.textContent || "").replace(/\\s+/g, " ").trim();
-                if (!text || text.length > 350) continue;
+                const text = (node.innerText || node.textContent || "").trim();
+                const normalized = text.replace(/\\s+/g, " ").trim();
 
-                if (dateRegex.test(text)) {
+                if (!normalized || normalized.length > 500) continue;
+
+                if (dateRegex.test(normalized) || amountRegex.test(normalized)) {
                     return {
                         text,
                         score: 999999,
@@ -320,13 +454,19 @@ async def get_ticket_date_prefix(button, index: int) -> str:
     )
 
     raw_text = result.get("text", "") if result else ""
-    prefix = normalize_french_date_text(raw_text, index)
 
-    print("Date candidate near this Voir button:")
-    print(raw_text[:300] if raw_text else "(none found)")
-    print(f"Extracted date prefix: {prefix}")
+    print("Ticket row text:")
+    print(raw_text[:500].replace("\n", " | ") if raw_text else "(none found)")
 
-    return prefix
+    return raw_text
+
+
+async def get_ticket_data(button, index: int) -> dict:
+    row_text = await get_ticket_row_text(button, index)
+    data = extract_ticket_data_from_text(row_text, index)
+
+    print(f"Extracted filename: {data['filename']}")
+    return data
 
 
 async def scroll_to_bottom(page):
@@ -337,6 +477,8 @@ async def scroll_to_bottom(page):
     while stable_rounds < SCROLL_STABLE_ROUNDS:
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         await page.wait_for_timeout(SCROLL_WAIT_MS)
+
+        await accept_cookies_if_present(page)
 
         height = await page.evaluate("document.body.scrollHeight")
         _, voir_count = await find_voir_buttons(page)
@@ -364,33 +506,23 @@ async def close_extra_pages(context, keep_page):
                 pass
 
 
-async def save_pdf_response(response, index: int, ticket_date_prefix: str) -> bool:
+async def save_pdf_response(response, target_path: Path) -> bool:
     headers = response.headers
     content_type = headers.get("content-type", "").lower()
 
     if "pdf" not in content_type:
         return False
 
-    fallback = f"monoprix-ticket-{index + 1:03}.pdf"
-    original_filename = filename_from_headers(headers, fallback)
-    filename = final_pdf_filename(ticket_date_prefix, original_filename, index)
-
-    path = target_path_or_none(filename)
-    if path is None:
-        return True
-
     body = await response.body()
-    path.write_bytes(body)
+    target_path.write_bytes(body)
 
-    print(f"Saved PDF response: {path}")
+    print(f"Saved PDF response: {target_path}")
     return True
 
 
-async def click_and_capture_pdf(page, context, button, index: int) -> bool:
+async def click_and_capture_pdf(page, context, button, target_path: Path) -> bool:
     await button.scroll_into_view_if_needed()
     await page.wait_for_timeout(700)
-
-    ticket_date_prefix = await get_ticket_date_prefix(button, index)
 
     # Case 1: normal browser download.
     try:
@@ -398,16 +530,9 @@ async def click_and_capture_pdf(page, context, button, index: int) -> bool:
             await button.click()
 
         download = await download_info.value
-        original_filename = download.suggested_filename or f"monoprix-ticket-{index + 1:03}.pdf"
-        filename = final_pdf_filename(ticket_date_prefix, original_filename, index)
+        await download.save_as(target_path)
 
-        path = target_path_or_none(filename)
-        if path is None:
-            return True
-
-        await download.save_as(path)
-
-        print(f"Saved download: {path}")
+        print(f"Saved download: {target_path}")
         return True
 
     except PlaywrightTimeoutError:
@@ -422,7 +547,7 @@ async def click_and_capture_pdf(page, context, button, index: int) -> bool:
             await button.click()
 
         response = await response_info.value
-        if await save_pdf_response(response, index, ticket_date_prefix):
+        if await save_pdf_response(response, target_path):
             return True
 
     except PlaywrightTimeoutError:
@@ -443,18 +568,9 @@ async def click_and_capture_pdf(page, context, button, index: int) -> bool:
             content_type = response.headers.get("content-type", "").lower()
 
             if "pdf" in content_type:
-                fallback = f"monoprix-ticket-{index + 1:03}.pdf"
-                original_filename = filename_from_headers(response.headers, fallback)
-                filename = final_pdf_filename(ticket_date_prefix, original_filename, index)
+                target_path.write_bytes(await response.body())
 
-                path = target_path_or_none(filename)
-                if path is None:
-                    await popup.close()
-                    return True
-
-                path.write_bytes(await response.body())
-
-                print(f"Saved popup PDF: {path}")
+                print(f"Saved popup PDF: {target_path}")
                 await popup.close()
                 return True
 
@@ -469,7 +585,7 @@ async def click_and_capture_pdf(page, context, button, index: int) -> bool:
 
 
 async def main():
-    OUT_DIR.mkdir(exist_ok=True)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     start_chrome_if_needed()
 
@@ -492,6 +608,8 @@ async def main():
             page = context.pages[0] if context.pages else await context.new_page()
             await page.goto(MONOPRIX_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
 
+        await accept_cookies_if_present(page)
+
         print()
         print("Use the opened Chrome window to log in to Monoprix if needed.")
         print("Make sure the tickets page is visible.")
@@ -504,6 +622,7 @@ async def main():
         else:
             await page.wait_for_timeout(3000)
 
+        await accept_cookies_if_present(page)
         await scroll_to_bottom(page)
 
         locator, count = await find_voir_buttons(page)
@@ -515,7 +634,8 @@ async def main():
             await browser.close()
             return
 
-        saved_or_skipped = 0
+        saved = 0
+        skipped = 0
         failed = 0
 
         for i in range(count):
@@ -529,10 +649,21 @@ async def main():
                 continue
 
             button = locator.nth(i)
-            ok = await click_and_capture_pdf(page, context, button, i)
+            await button.scroll_into_view_if_needed()
+            await page.wait_for_timeout(500)
+
+            ticket_data = await get_ticket_data(button, i)
+            target_path = OUT_DIR / ticket_data["filename"]
+
+            if target_path.exists():
+                print(f"Already exists, skipping without clicking: {target_path}")
+                skipped += 1
+                continue
+
+            ok = await click_and_capture_pdf(page, context, button, target_path)
 
             if ok:
-                saved_or_skipped += 1
+                saved += 1
             else:
                 failed += 1
                 print(f"Could not capture PDF for item {i + 1}.")
@@ -541,7 +672,7 @@ async def main():
             await page.wait_for_timeout(1000)
 
         print()
-        print(f"Done. Saved or skipped: {saved_or_skipped}. Failed: {failed}.")
+        print(f"Done. Saved: {saved}. Skipped: {skipped}. Failed: {failed}.")
         print(f"PDF folder: {OUT_DIR.resolve()}")
 
         await browser.close()
