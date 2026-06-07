@@ -78,7 +78,7 @@ OUT_DIR=pdfs
 AUTO_START_CHROME=true
 CHROME_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe
 CHROME_USER_DATA_DIR=.chrome-profile
-CHROME_START_TIMEOUT_SECONDS=20
+CHROME_START_TIMEOUT_SECONDS=30
 
 SCROLL_STABLE_ROUNDS=5
 SCROLL_WAIT_MS=1800
@@ -137,6 +137,7 @@ The script will then:
 3. Click each one.
 4. Save each PDF.
 5. Skip PDFs that already exist.
+6. Close the automation Chrome window before exiting.
 
 ## Manual Chrome start option
 
@@ -185,18 +186,31 @@ pdfs/
 Example filenames:
 
 ```text
-2025-11-01-item-001-ticket.pdf
-2025-10-24-item-002-ticket.pdf
-2025-10-18-item-003-ticket.pdf
+2026-05-15_10-52_Monoprix_14-84_EUR.pdf
+2026-05-10_19-03_Monoprix_37-20_EUR.pdf
+2026-05-02_12-18_Monoprix_8-95_EUR.pdf
 ```
 
-If the same filename already exists, the script prints:
+## How skipping works
+
+Before clicking a `Voir` button, the script reads the ticket row and builds the
+target filename from:
+
+- date and time
+- store name
+- amount
+
+It then checks whether that exact filename already exists in `OUT_DIR`.
+
+If the file exists, the script does not click `Voir` and does not download the
+PDF again. It prints:
 
 ```text
-Already exists, skipping: pdfs\2025-11-01-item-001-ticket.pdf
+Already exists, skipping without clicking: pdfs\2026-05-15_10-52_Monoprix_14-84_EUR.pdf
 ```
 
-It will not overwrite the file.
+The duplicate check is filename-based. It does not compare PDF contents or file
+hashes.
 
 ## Git setup
 
