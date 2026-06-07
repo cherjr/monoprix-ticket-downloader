@@ -86,10 +86,10 @@ def is_cdp_available() -> bool:
         return False
 
 
-def start_chrome_if_needed() -> None:
+def start_chrome_if_needed():
     if is_cdp_available():
         print(f"Chrome DevTools already available at {CDP_URL}")
-        return
+        return None
 
     if not AUTO_START_CHROME:
         raise RuntimeError(
@@ -112,7 +112,7 @@ def start_chrome_if_needed() -> None:
     print(f"Chrome profile: {CHROME_USER_DATA_DIR}")
     print(f"Debug port: {CDP_PORT}")
 
-    subprocess.Popen(
+    chrome_process = subprocess.Popen(
         [
             CHROME_PATH,
             f"--remote-debugging-port={CDP_PORT}",
@@ -131,7 +131,7 @@ def start_chrome_if_needed() -> None:
     while time.time() < deadline:
         if is_cdp_available():
             print(f"Chrome DevTools is available at {CDP_URL}")
-            return
+            return chrome_process
 
         time.sleep(0.5)
 
@@ -140,6 +140,30 @@ def start_chrome_if_needed() -> None:
         f"Expected URL: {CDP_URL}/json/version\n"
         f"Chrome profile used: {CHROME_USER_DATA_DIR}"
     )
+
+
+def terminate_started_chrome(chrome_process) -> None:
+    if chrome_process is None or chrome_process.poll() is not None:
+        return
+
+    print("Closing automation Chrome...")
+    chrome_process.terminate()
+    chrome_process.wait(timeout=10)
+
+
+async def close_browser(browser, chrome_process) -> None:
+    if browser is None:
+        terminate_started_chrome(chrome_process)
+        return
+
+    if chrome_process is None:
+        await browser.close()
+        return
+
+    print("Closing automation Chrome...")
+    cdp_session = await browser.new_browser_cdp_session()
+    await cdp_session.send("Browser.close")
+    chrome_process.wait(timeout=10)
 
 
 def safe_filename(name: str) -> str:
@@ -587,95 +611,97 @@ async def click_and_capture_pdf(page, context, button, target_path: Path) -> boo
 async def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    start_chrome_if_needed()
+    chrome_process = start_chrome_if_needed()
 
     async with async_playwright() as p:
-        print(f"Connecting to Chrome at {CDP_URL}...")
-        browser = await p.chromium.connect_over_cdp(CDP_URL)
+        browser = None
 
-        if not browser.contexts:
-            raise RuntimeError("Connected to Chrome, but no browser context was found.")
+        try:
+            print(f"Connecting to Chrome at {CDP_URL}...")
+            browser = await p.chromium.connect_over_cdp(CDP_URL)
 
-        context = browser.contexts[0]
+            if not browser.contexts:
+                raise RuntimeError("Connected to Chrome, but no browser context was found.")
 
-        page = None
-        for candidate in context.pages:
-            if "monoprix.fr" in candidate.url:
-                page = candidate
-                break
+            context = browser.contexts[0]
 
-        if page is None:
-            page = context.pages[0] if context.pages else await context.new_page()
-            await page.goto(MONOPRIX_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+            page = None
+            for candidate in context.pages:
+                if "monoprix.fr" in candidate.url:
+                    page = candidate
+                    break
 
-        await accept_cookies_if_present(page)
+            if page is None:
+                page = context.pages[0] if context.pages else await context.new_page()
+                await page.goto(MONOPRIX_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
 
-        print()
-        print("Use the opened Chrome window to log in to Monoprix if needed.")
-        print("Make sure the tickets page is visible.")
-        input("When ready, press Enter here...")
+            await accept_cookies_if_present(page)
 
-        current_url = page.url
-        if "monoprix.fr" not in current_url:
-            await page.goto(MONOPRIX_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
-            await page.wait_for_timeout(5000)
-        else:
-            await page.wait_for_timeout(3000)
+            print()
+            print("Use the opened Chrome window to log in to Monoprix if needed.")
+            print("Make sure the tickets page is visible.")
+            input("When ready, press Enter here...")
 
-        await accept_cookies_if_present(page)
-        await scroll_to_bottom(page)
-
-        locator, count = await find_voir_buttons(page)
-        print()
-        print(f'Found {count} "Voir" links/buttons.')
-
-        if count == 0:
-            print("No Voir links found. Make sure you are logged in and on the tickets page.")
-            await browser.close()
-            return
-
-        saved = 0
-        skipped = 0
-        failed = 0
-
-        for i in range(count):
-            print(f"\nProcessing {i + 1}/{count}...")
-
-            locator, fresh_count = await find_voir_buttons(page)
-
-            if i >= fresh_count:
-                print(f"Item {i + 1} no longer exists.")
-                failed += 1
-                continue
-
-            button = locator.nth(i)
-            await button.scroll_into_view_if_needed()
-            await page.wait_for_timeout(500)
-
-            ticket_data = await get_ticket_data(button, i)
-            target_path = OUT_DIR / ticket_data["filename"]
-
-            if target_path.exists():
-                print(f"Already exists, skipping without clicking: {target_path}")
-                skipped += 1
-                continue
-
-            ok = await click_and_capture_pdf(page, context, button, target_path)
-
-            if ok:
-                saved += 1
+            current_url = page.url
+            if "monoprix.fr" not in current_url:
+                await page.goto(MONOPRIX_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+                await page.wait_for_timeout(5000)
             else:
-                failed += 1
-                print(f"Could not capture PDF for item {i + 1}.")
+                await page.wait_for_timeout(3000)
 
-            await close_extra_pages(context, page)
-            await page.wait_for_timeout(1000)
+            await accept_cookies_if_present(page)
+            await scroll_to_bottom(page)
 
-        print()
-        print(f"Done. Saved: {saved}. Skipped: {skipped}. Failed: {failed}.")
-        print(f"PDF folder: {OUT_DIR.resolve()}")
+            locator, count = await find_voir_buttons(page)
+            print()
+            print(f'Found {count} "Voir" links/buttons.')
 
-        await browser.close()
+            if count == 0:
+                print("No Voir links found. Make sure you are logged in and on the tickets page.")
+                return
+
+            saved = 0
+            skipped = 0
+            failed = 0
+
+            for i in range(count):
+                print(f"\nProcessing {i + 1}/{count}...")
+
+                locator, fresh_count = await find_voir_buttons(page)
+
+                if i >= fresh_count:
+                    print(f"Item {i + 1} no longer exists.")
+                    failed += 1
+                    continue
+
+                button = locator.nth(i)
+                await button.scroll_into_view_if_needed()
+                await page.wait_for_timeout(500)
+
+                ticket_data = await get_ticket_data(button, i)
+                target_path = OUT_DIR / ticket_data["filename"]
+
+                if target_path.exists():
+                    print(f"Already exists, skipping without clicking: {target_path}")
+                    skipped += 1
+                    continue
+
+                ok = await click_and_capture_pdf(page, context, button, target_path)
+
+                if ok:
+                    saved += 1
+                else:
+                    failed += 1
+                    print(f"Could not capture PDF for item {i + 1}.")
+
+                await close_extra_pages(context, page)
+                await page.wait_for_timeout(1000)
+
+            print()
+            print(f"Done. Saved: {saved}. Skipped: {skipped}. Failed: {failed}.")
+            print(f"PDF folder: {OUT_DIR.resolve()}")
+        finally:
+            await close_browser(browser, chrome_process)
 
 
 if __name__ == "__main__":
