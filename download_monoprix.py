@@ -193,6 +193,37 @@ def normalize_amount_for_filename(amount: str) -> str:
     return amount or "unknown-amount"
 
 
+def clean_store_text(store: str) -> str:
+    store = " ".join((store or "").split())
+    store = re.sub(r"\bVoir\b.*$", "", store, flags=re.I).strip()
+    return store
+
+
+def extract_store_from_text(row_text: str, amount_match, date_match) -> str:
+    text = " ".join((row_text or "").split())
+
+    if amount_match and date_match and amount_match.end() <= date_match.start():
+        store = clean_store_text(text[amount_match.end() : date_match.start()])
+
+        if store:
+            return store
+
+    lines = [line.strip() for line in (row_text or "").splitlines() if line.strip()]
+
+    for line in lines:
+        store = clean_store_text(line)
+
+        if (
+            "monop" in store.lower()
+            and "€" not in store
+            and not re.search(r"\b[0-3]?\d[/.\-][01]?\d[/.\-](?:20)?\d{2}", store)
+            and len(store) <= 80
+        ):
+            return store
+
+    return "Monoprix"
+
+
 def extract_ticket_data_from_text(row_text: str, index: int) -> dict:
     """
     Extracts:
@@ -217,6 +248,7 @@ def extract_ticket_data_from_text(row_text: str, index: int) -> dict:
     )
 
     date_prefix = None
+    date_match = numeric_datetime
 
     if numeric_datetime:
         day = numeric_datetime.group(1).zfill(2)
@@ -246,6 +278,7 @@ def extract_ticket_data_from_text(row_text: str, index: int) -> dict:
         )
 
         if written:
+            date_match = written
             day = written.group(1).zfill(2)
             month = FRENCH_MONTHS[written.group(2).lower()]
             year = written.group(3)
@@ -264,17 +297,7 @@ def extract_ticket_data_from_text(row_text: str, index: int) -> dict:
     if date_prefix is None:
         date_prefix = f"unknown-date-item-{index + 1:03}"
 
-    # Store extraction:
-    # Prefer a line containing Monoprix. If there are variants like "Monoprix Montparnasse",
-    # this keeps the visible store text.
-    lines = [line.strip() for line in (row_text or "").splitlines() if line.strip()]
-    store_raw = "Monoprix"
-
-    for line in lines:
-        if "monoprix" in line.lower():
-            store_raw = line
-            break
-
+    store_raw = extract_store_from_text(row_text, amount_match, date_match)
     store_for_file = normalize_store_name(store_raw)
 
     filename = safe_filename(f"{date_prefix}_{store_for_file}_{amount_for_file}_EUR.pdf")
