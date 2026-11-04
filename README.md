@@ -85,6 +85,7 @@ SCROLL_WAIT_MS=1800
 
 CLICK_TIMEOUT_MS=7000
 PAGE_TIMEOUT_MS=90000
+LOGIN_TIMEOUT_SECONDS=300
 ```
 
 ### Important settings
@@ -115,6 +116,14 @@ OUT_DIR=pdfs
 
 PDFs are saved into this folder.
 
+#### `LOGIN_TIMEOUT_SECONDS`
+
+```dotenv
+LOGIN_TIMEOUT_SECONDS=300
+```
+
+Time to wait for you to log in. After that, the script stops.
+
 ## Running the downloader
 
 Run:
@@ -123,12 +132,8 @@ Run:
 python .\download_monoprix.py
 ```
 
-When Chrome opens:
-
-1. Log in to Monoprix if needed.
-2. Make sure the tickets page is visible.
-3. Go back to PowerShell.
-4. Press Enter.
+When Chrome opens, log in to Monoprix if needed. The script continues by
+itself once the tickets page shows your tickets, and prints `Logged in.`
 
 The script will then:
 
@@ -268,14 +273,12 @@ Invoke-WebRequest http://localhost:9222/json/version
 
 If that fails, close the automation Chrome window and run again.
 
-### The script finds zero `Voir` buttons
+### `Not logged in after 300 seconds.`
 
-Make sure:
+The script did not see any ticket on the tickets page in time. Run again and
+log in in the Chrome window, or increase `LOGIN_TIMEOUT_SECONDS`.
 
-1. You are logged in.
-2. The Monoprix tickets page is visible.
-3. The page has fully loaded.
-4. You pressed Enter in PowerShell only after the tickets page was ready.
+An account with no tickets at all also stops with this message.
 
 ### The script misses older tickets
 

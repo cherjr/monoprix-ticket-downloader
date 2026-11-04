@@ -5,10 +5,10 @@ import subprocess
 import time
 import urllib.request
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import async_playwright, Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 
 
 load_dotenv()
@@ -56,6 +56,7 @@ SCROLL_STABLE_ROUNDS = int(os.getenv("SCROLL_STABLE_ROUNDS", "5"))
 SCROLL_WAIT_MS = int(os.getenv("SCROLL_WAIT_MS", "1800"))
 CLICK_TIMEOUT_MS = int(os.getenv("CLICK_TIMEOUT_MS", "7000"))
 PAGE_TIMEOUT_MS = int(os.getenv("PAGE_TIMEOUT_MS", "90000"))
+LOGIN_TIMEOUT_SECONDS = int(os.getenv("LOGIN_TIMEOUT_SECONDS", "300"))
 CHROME_START_TIMEOUT_SECONDS = int(os.getenv("CHROME_START_TIMEOUT_SECONDS", "30"))
 
 
@@ -311,6 +312,28 @@ def extract_ticket_data_from_text(row_text: str, index: int) -> dict:
     }
 
 
+def login_state(url: str, voir_count: int) -> str:
+    """
+    Next step while waiting for the login, from the page URL and the number
+    of Voir links:
+      "ready"         tickets page with Voir links
+      "open_tickets"  another client.monoprix.fr page, e.g. after login
+      "wait"          SSO login page, or tickets page still loading
+
+    Only the host and path are checked: the SSO login URL can contain the
+    tickets URL as a redirect parameter.
+    """
+    parsed = urlparse(url or "")
+
+    if parsed.hostname != "client.monoprix.fr":
+        return "wait"
+
+    if "tickets" in parsed.path:
+        return "ready" if voir_count > 0 else "wait"
+
+    return "open_tickets"
+
+
 async def find_voir_buttons(page):
     locator = page.get_by_text("Voir", exact=True)
     count = await locator.count()
@@ -516,6 +539,41 @@ async def get_ticket_data(button, index: int) -> dict:
     return data
 
 
+async def wait_for_login(page) -> bool:
+    """
+    Waits up to LOGIN_TIMEOUT_SECONDS for the tickets page with Voir links.
+    Opens the tickets page from other client.monoprix.fr pages (at most
+    every 10 seconds). Returns False on timeout.
+    """
+    deadline = time.time() + LOGIN_TIMEOUT_SECONDS
+    last_open = 0.0
+
+    while time.time() < deadline:
+        try:
+            _, voir_count = await find_voir_buttons(page)
+        except PlaywrightError:
+            # For example "Execution context was destroyed" during navigation.
+            voir_count = 0
+
+        state = login_state(page.url, voir_count)
+
+        if state == "ready":
+            return True
+
+        if state == "open_tickets" and time.time() - last_open >= 10:
+            last_open = time.time()
+
+            try:
+                await page.goto(MONOPRIX_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+            except PlaywrightError:
+                pass
+
+        await accept_cookies_if_present(page)
+        await page.wait_for_timeout(2000)
+
+    return False
+
+
 async def scroll_to_bottom(page):
     stable_rounds = 0
     last_height = -1
@@ -661,17 +719,14 @@ async def main():
             await accept_cookies_if_present(page)
 
             print()
-            print("Use the opened Chrome window to log in to Monoprix if needed.")
-            print("Make sure the tickets page is visible.")
-            input("When ready, press Enter here...")
+            print("Log in to Monoprix in the opened Chrome window if needed.")
+            print("The script continues automatically once you are logged in.")
 
-            current_url = page.url
-            if "monoprix.fr" not in current_url:
-                await page.goto(MONOPRIX_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
-                await page.wait_for_timeout(5000)
-            else:
-                await page.wait_for_timeout(3000)
+            if not await wait_for_login(page):
+                print(f"Not logged in after {LOGIN_TIMEOUT_SECONDS} seconds. Run the script again and log in in the Chrome window.")
+                return
 
+            print("Logged in.")
             await accept_cookies_if_present(page)
             await scroll_to_bottom(page)
 

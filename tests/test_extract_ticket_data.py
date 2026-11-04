@@ -11,10 +11,11 @@ playwright = types.ModuleType("playwright")
 playwright_async_api = types.ModuleType("playwright.async_api")
 playwright_async_api.async_playwright = None
 playwright_async_api.TimeoutError = TimeoutError
+playwright_async_api.Error = Exception
 sys.modules["playwright"] = playwright
 sys.modules["playwright.async_api"] = playwright_async_api
 
-from download_monoprix import extract_ticket_data_from_text
+from download_monoprix import extract_ticket_data_from_text, login_state
 
 
 class ExtractTicketDataTest(unittest.TestCase):
@@ -93,6 +94,29 @@ class ExtractTicketDataTest(unittest.TestCase):
                 self.assertEqual(data["date_prefix"], date_prefix)
                 self.assertEqual(data["store"], store)
                 self.assertEqual(data["filename"], filename)
+
+
+class LoginStateTest(unittest.TestCase):
+    TICKETS = "https://client.monoprix.fr/monoprix-shopping/tickets"
+
+    def test_next_step_from_url_and_voir_count(self):
+        cases = [
+            (self.TICKETS, 3, "ready"),
+            (self.TICKETS, 0, "wait"),
+            ("https://client.monoprix.fr/monoprix-shopping", 0, "open_tickets"),
+            ("https://sso.monoprix.fr/login", 0, "wait"),
+            ("about:blank", 0, "wait"),
+            ("", 0, "wait"),
+        ]
+
+        for url, voir_count, expected in cases:
+            with self.subTest(url=url, voir_count=voir_count):
+                self.assertEqual(login_state(url, voir_count), expected)
+
+    def test_sso_login_with_tickets_redirect_waits(self):
+        url = f"https://sso.monoprix.fr/login?redirect_uri={self.TICKETS}"
+
+        self.assertEqual(login_state(url, 0), "wait")
 
 
 if __name__ == "__main__":
