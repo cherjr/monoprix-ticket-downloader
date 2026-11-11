@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import re
 import subprocess
@@ -31,7 +32,7 @@ MONOPRIX_URL = os.getenv(
 )
 
 CDP_HOST = os.getenv("CDP_HOST", "localhost")
-CDP_PORT = int(os.getenv("CDP_PORT", "9222"))
+CDP_PORT = int(os.getenv("CDP_PORT", "9223"))
 CDP_URL = os.getenv("CDP_URL", f"http://{CDP_HOST}:{CDP_PORT}")
 
 OUT_DIR = Path(resolve_local_path(os.getenv("OUT_DIR", "pdfs")))
@@ -87,8 +88,22 @@ def is_cdp_available() -> bool:
         return False
 
 
+def get_cdp_user_agent() -> str:
+    with urllib.request.urlopen(f"{CDP_URL}/json/version", timeout=2) as response:
+        return json.load(response).get("User-Agent", "")
+
+
 def start_chrome_if_needed():
     if is_cdp_available():
+        user_agent = get_cdp_user_agent()
+
+        if "Windows" not in user_agent:
+            raise RuntimeError(
+                f"Port {CDP_PORT} is already used by a non-Windows browser ({user_agent}), "
+                "likely WSL Chromium forwarded to localhost. "
+                "Set CDP_PORT/CDP_URL in .env to a free port."
+            )
+
         print(f"Chrome DevTools already available at {CDP_URL}")
         return None
 

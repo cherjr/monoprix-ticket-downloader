@@ -70,8 +70,8 @@ Default `.env` values:
 MONOPRIX_URL=https://client.monoprix.fr/monoprix-shopping/tickets
 
 CDP_HOST=localhost
-CDP_PORT=9222
-CDP_URL=http://localhost:9222
+CDP_PORT=9223
+CDP_URL=http://localhost:9223
 
 OUT_DIR=pdfs
 
@@ -152,14 +152,14 @@ Run this in PowerShell:
 
 ```powershell
 & "C:\Program Files\Google\Chrome\Application\chrome.exe" `
-  --remote-debugging-port=9222 `
+  --remote-debugging-port=9223 `
   --user-data-dir="$env:USERPROFILE\monoprix-automation-chrome"
 ```
 
 Then verify Chrome DevTools is reachable:
 
 ```powershell
-Invoke-WebRequest http://localhost:9222/json/version
+Invoke-WebRequest http://localhost:9223/json/version
 ```
 
 You should see:
@@ -268,7 +268,7 @@ If Chrome is installed elsewhere, update that value.
 Check:
 
 ```powershell
-Invoke-WebRequest http://localhost:9222/json/version
+Invoke-WebRequest http://localhost:9223/json/version
 ```
 
 If that fails, close the automation Chrome window and run again.
